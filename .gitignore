@@ -1,0 +1,36 @@
+# ============================================================
+# .gitignore with issues - should exclude secrets but doesn't
+# ============================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Note: This .gitignore intentionally does NOT exclude:
+# - .env files (should be excluded)
+# - secrets.* files (should be excluded)
+# - *.pem files (should be excluded)
+# - *.key files (should be excluded)
+# - credentials.json (should be excluded)
+# - terraform.tfstate (should be excluded)
+# - kubeconfig (should be excluded)
