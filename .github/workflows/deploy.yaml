@@ -1,0 +1,59 @@
+# ============================================================
+# GitHub Actions - Deployment workflow with security issues
+# ============================================================
+
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+# Issue: Missing permissions restriction
+# permissions: write-all
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Issue: No environment protection
+    # Issue: No required reviewers
+
+    steps:
+    - uses: actions/checkout@v2  # Issue: Old version
+
+    - name: Deploy to production
+      env:
+        # Issue: Secrets hardcoded in env
+        AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+        AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+        DATABASE_URL: postgres://admin:Password123!@db:5432/production
+        SECRET_KEY: super_secret_key_12345
+        SSH_PRIVATE_KEY: |
+          -----BEGIN RSA PRIVATE KEY-----
+          FAKE_KEY_FOR_DEMO
+          -----END RSA PRIVATE KEY-----
+      run: |
+        # Issue: Running deployment script directly
+        curl -sSL https://deploy.example.com/deploy.sh | bash
+
+    # Issue: No artifact verification
+    - name: Download artifact
+      run: |
+        wget https://artifacts.example.com/app.tar.gz
+        tar -xzf app.tar.gz
+        # Issue: No checksum verification
+
+    - name: SSH to production
+      env:
+        SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      run: |
+        # Issue: Using password-based SSH
+        ssh -o StrictHostKeyChecking=no root@production.example.com << 'EOF'
+          cd /opt/app
+          git pull
+          pip install -r requirements.txt
+          systemctl restart app
+        EOF
+
+    # Issue: No rollback strategy
+    # Issue: No smoke tests
+    # Issue: No notification on failure

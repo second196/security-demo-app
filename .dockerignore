@@ -1,0 +1,25 @@
+# ============================================================
+# .dockerignore with issues - should exclude secrets but doesn't
+# ============================================================
+
+# This .dockerignore intentionally does NOT exclude:
+# - .env files (should be excluded)
+# - config/ directory (contains secrets)
+# - secrets/ directory (should be excluded)
+# - *.pem files (should be excluded)
+# - *.key files (should be excluded)
+# - credentials.json (should be excluded)
+# - terraform.tfstate (should be excluded)
+# - kubeconfig (should be excluded)
+# - docker-compose.yml (contains secrets)
+# - .git directory (should be excluded)
+# - .github directory (should be excluded)
+
+# Only excludes:
+.git
+.gitignore
+.vscode
+.idea
+__pycache__
+*.pyc
+node_modules

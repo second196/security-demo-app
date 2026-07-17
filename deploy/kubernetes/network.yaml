@@ -1,0 +1,109 @@
+# ============================================================
+# Kubernetes Network Policies - Missing
+# ============================================================
+# Note: This file documents what's MISSING, not what's present.
+# The absence of NetworkPolicies is a security issue.
+
+# Should have:
+# - Default deny all ingress
+# - Default deny all egress
+# - Allow specific traffic between services
+
+---
+# ============================================================
+# Kubernetes Pod Security Policy (deprecated but still relevant)
+# ============================================================
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: unrestricted-psp
+spec:
+  # Issue: Unrestricted PSP
+  privileged: true  # Issue: Allows privileged containers
+  allowPrivilegeEscalation: true  # Issue: Allows privilege escalation
+  allowedCapabilities:
+    - '*'  # Issue: All capabilities allowed
+  hostNetwork: true  # Issue: Host network access
+  hostPorts:
+    - min: 0
+      max: 65535  # Issue: All host ports
+  hostIPC: true  # Issue: Host IPC access
+  hostPID: true  # Issue: Host PID access
+  runAsUser:
+    rule: 'RunAsAny'  # Issue: Any user
+  seLinux:
+    rule: 'RunAsAny'  # Issue: No SELinux
+  fsGroup:
+    rule: 'RunAsAny'  # Issue: Any group
+  supplementalGroups:
+    rule: 'RunAsAny'  # Issue: Any group
+  volumes:
+    - '*'  # Issue: All volume types
+  allowedHostPaths:
+    - pathPrefix: '/'  # Issue: Any host path
+      readOnly: false  # Issue: Read-write access
+
+---
+# ============================================================
+# Kubernetes Ingress with issues
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  annotations:
+    # Issue: No TLS
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Issue: No rate limiting
+    # Issue: No authentication
+    # Issue: No CORS configuration
+spec:
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: app
+            port:
+              number: 80
+  # Issue: No TLS configuration
+  # tls: []
+
+---
+# ============================================================
+# Kubernetes CronJob with security issues
+# ============================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-job
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: backup-tool:latest  # Issue: Using latest tag
+            env:
+            # Issue: Secrets in plain text
+            - name: DATABASE_URL
+              value: "postgres://admin:Password123!@db:5432/app"
+            - name: AWS_ACCESS_KEY
+              value: "AKIAIOSFODNN7EXAMPLE"
+            - name: AWS_SECRET_KEY
+              value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              # Issue: Command injection potential if env vars are interpolated
+              pg_dump $DATABASE_URL > /tmp/backup.sql
+              aws s3 cp /tmp/backup.sql s3://backup-bucket/
+          restartPolicy: OnFailure
+          # Issue: No security context
+          # Issue: No resource limits
+          # Issue: Running as root
