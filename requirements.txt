@@ -1,0 +1,15 @@
+flask==2.0.1
+requests==2.25.0
+cryptography==3.4.6
+Jinja2==3.0.3
+Werkzeug==2.0.3
+urllib3==1.26.5
+certifi==2021.5.30
+pyyaml==5.4.1
+sqlalchemy==1.4.25
+celery==5.2.2
+redis==4.0.2
+gunicorn==20.1.0
+psycopg2-binary==2.9.1
+boto3==1.20.0
+paramiko==2.7.2
