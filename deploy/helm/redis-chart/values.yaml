@@ -1,0 +1,72 @@
+# ============================================================
+# Helm values with security issues
+# ============================================================
+
+replicaCount: 1
+
+image:
+  repository: redis
+  tag: "latest"  # Issue 1: Using latest tag
+  pullPolicy: Always
+
+# Issue 2: No image pull secrets specified
+# imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  # Issue 3: Using default name
+  name: ""
+  annotations: {}
+
+# Issue 4: No pod security context
+podSecurityContext: {}
+
+# Issue 5: No security context
+securityContext: {}
+
+service:
+  type: NodePort  # Issue 6: NodePort exposed
+  port: 6379
+  nodePort: 30379  # Issue 7: Fixed NodePort
+
+ingress:
+  enabled: true
+  annotations:
+    # Issue 8: No TLS configured
+    kubernetes.io/ingress.class: nginx
+  hosts:
+  - host: redis.local
+    paths:
+    - path: /
+      pathType: Prefix
+  tls: []  # Issue 9: No TLS
+
+# Issue 10: No resource limits
+resources: {}
+
+# Issue 11: No liveness/readiness probes
+livenessProbe: {}
+readinessProbe: {}
+
+# Issue 12: Redis password in values
+redis:
+  password: "redis_password_123"  # Issue 13: Hardcoded password
+  # password: ""  # Could be empty
+
+# Issue 14: No network policy
+# Issue 15: Running as root
+
+# ============================================================
+# ConfigMap with sensitive data
+# ============================================================
+configMap:
+  enabled: true
+  data:
+    # Issue 16: Credentials in ConfigMap
+    redis.conf: |
+      requirepass redis_password_123
+      bind 0.0.0.0
+      protected-mode no
+
+# Issue 17: No PDB (Pod Disruption Budget)
+# Issue 18: No RBAC restrictions

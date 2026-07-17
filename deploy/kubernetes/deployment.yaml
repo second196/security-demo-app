@@ -1,0 +1,100 @@
+# ============================================================
+# Kubernetes Deployment with security issues
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-demo-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-demo-app
+  template:
+    metadata:
+      labels:
+        app: security-demo-app
+    spec:
+      # Issue 1: Using default namespace
+      # Issue 2: No security context
+      containers:
+      - name: app
+        image: security-demo-app:latest  # Issue 3: Using latest tag
+        ports:
+        - containerPort: 5000
+        - containerPort: 8080  # Issue 4: Exposing unnecessary ports
+        env:
+        # Issue 5: Secrets in plain text environment variables
+        - name: AWS_ACCESS_KEY_ID
+          value: "AKIAIOSFODNN7EXAMPLE"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        - name: DATABASE_PASSWORD
+          value: "admin:Password123!"
+        - name: SECRET_KEY
+          value: "super_secret_key_12345"
+        # Issue 6: No resource limits
+        # Issue 7: No liveness/readiness probes
+        # Issue 8: Running as root
+        securityContext:
+          privileged: true  # Issue 9: Privileged container
+          capabilities:
+            add: ["ALL"]  # Issue 10: All capabilities added
+          readOnlyRootFilesystem: false
+          runAsNonRoot: false
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock  # Issue 11: Docker socket mounted
+      volumes:
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock  # Issue 12: Host path mount
+          type: Socket
+      serviceAccountName: default  # Issue 13: Using default service account
+---
+# ============================================================
+# Kubernetes Service with NodePort (unnecessary exposure)
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-demo-app-service
+spec:
+  type: NodePort  # Issue 14: Using NodePort instead of ClusterIP
+  ports:
+  - port: 5000
+    targetPort: 5000
+    nodePort: 30080  # Issue 15: Fixed NodePort
+  selector:
+    app: security-demo-app
+---
+# ============================================================
+# Kubernetes ConfigMap with sensitive data
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-demo-config
+data:
+  # Issue 16: Sensitive data in ConfigMap instead of Secret
+  app.conf: |
+    database_url=postgres://admin:Password123@db:5432/myapp
+    redis_url=redis://:admin@redis:6379
+    api_key=sk_live_4eC39HqLyjWDarjtT1zdp7dc
+---
+# ============================================================
+# ClusterRoleBinding - excessive permissions
+# ============================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: security-demo-admin
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin  # Issue 17: Overly permissive role
+  apiGroup: rbac.authorization.k8s.io

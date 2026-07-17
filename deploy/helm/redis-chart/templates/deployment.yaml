@@ -1,0 +1,53 @@
+# ============================================================
+# Helm Redis Deployment with security issues
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "redis-chart.fullname" . }}
+  labels:
+    {{- include "redis-chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "redis-chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "redis-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: redis
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: 6379
+        env:
+        # Issue 1: Password from values (hardcoded)
+        - name: REDIS_PASSWORD
+          value: {{ .Values.redis.password | quote }}
+        # Issue 2: No security context on pod
+        # Issue 3: No resource limits
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      # Issue 4: No service account restrictions
+      serviceAccountName: {{ include "redis-chart.serviceAccountName" . }}
+---
+# ============================================================
+# Service with NodePort
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "redis-chart.fullname" . }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  - port: {{ .Values.service.port }}
+    targetPort: 6379
+    nodePort: {{ .Values.service.nodePort }}
+  selector:
+    {{- include "redis-chart.selectorLabels" . | nindent 4 }}

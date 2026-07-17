@@ -1,0 +1,158 @@
+# ============================================================
+# CloudFormation Template with security issues
+# ============================================================
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Security Demo Application Stack'
+
+Parameters:
+  # Issue 1: Default password in parameters
+  DatabasePassword:
+    Type: String
+    Default: 'Password123!'
+    NoEcho: false  # Issue 2: NoEcho not set to true
+    Description: Database password
+
+  Environment:
+    Type: String
+    Default: 'production'
+
+Resources:
+  # ============================================================
+  # S3 Bucket - Public and unencrypted
+  # ============================================================
+  AppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${Environment}-app-bucket-${AWS::AccountId}'
+      # Issue 3: No encryption configuration
+      # Issue 4: No versioning
+      # Issue 5: No access logging
+      # Issue 6: No lifecycle rules
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false  # Issue 7: Public access allowed
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # ============================================================
+  # Security Group - Overly permissive
+  # ============================================================
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Web server security group'
+      SecurityGroupIngress:
+        # Issue 8: All ports open to 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+        # Issue 9: SSH open to world
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  # ============================================================
+  # RDS Database
+  # ============================================================
+  AppDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-app-db'
+      Engine: mysql
+      EngineVersion: '5.7'
+      DBInstanceClass: db.t2.micro
+      MasterUsername: admin
+      # Issue 10: Hardcoded password in template
+      MasterUserPassword: !Ref DatabasePassword
+      # Issue 11: Publicly accessible
+      PubliclyAccessible: true
+      # Issue 12: No encryption
+      StorageEncrypted: false
+      # Issue 13: No backup
+      BackupRetentionPeriod: 0
+      # Issue 14: No deletion protection
+      DeletionProtection: false
+      VPCSecurityGroups:
+        - !Ref WebSecurityGroup
+      # Issue 15: No IAM auth
+      EnableIAMDatabaseAuthentication: false
+      # Issue 16: Auto minor version upgrade disabled
+      AutoMinorVersionUpgrade: false
+
+  # ============================================================
+  # EC2 Instance
+  # ============================================================
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0c55b159cbfafe1f0
+      # Issue 17: No monitoring enabled
+      Monitoring: false
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      # Issue 18: User data with secrets
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "DB_PASSWORD=${DatabasePassword}" >> /etc/environment
+          echo "AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE" >> /etc/environment
+          yum install -y httpd
+          systemctl start httpd
+
+      # Issue 19: No IAM instance profile
+      # Issue 20: No root volume encryption
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp2
+            # Issue 21: No encryption
+            Encrypted: false
+
+  # ============================================================
+  # IAM Policy - Overly permissive
+  # ============================================================
+  AdminPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AdminAccess
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Issue 22: Wildcard permissions
+          - Effect: Allow
+            Action: '*'
+            Resource: '*'
+
+  # ============================================================
+  # API Gateway - No authentication
+  # ============================================================
+  PublicAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${Environment}-public-api'
+      # Issue 23: No authorization configured
+      EndpointConfiguration:
+        types:
+          - REGIONAL
+
+  # ============================================================
+  # CloudWatch Log Group - No retention
+  # ============================================================
+  AppLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${Environment}/app'
+      # Issue 24: No retention policy (infinite retention)
+      # RetentionInDays: 30
+
+Outputs:
+  # Issue 25: Outputting sensitive values
+  DatabaseEndpoint:
+    Value: !Ref AppDatabase
+  DatabasePassword:
+    Value: !Ref DatabasePassword
+    Description: 'Database password (insecure output)'
