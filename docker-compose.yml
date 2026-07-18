@@ -1,0 +1,76 @@
+# ============================================================
+# Docker Compose with security issues
+# ============================================================
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+      - "8080:8080"  # Issue: Exposing debug port
+    environment:
+      # Issue: Secrets in environment variables
+      - DATABASE_URL=postgres://admin:Password123!@db:5432/app
+      - REDIS_URL=redis://:redis_password_123@redis:6379
+      - SECRET_KEY=super_secret_key_12345
+      - AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+      - AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    volumes:
+      # Issue: Mounting Docker socket
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Issue: Mounting host filesystem
+      - /etc/passwd:/etc/passwd:ro
+      - /:/host:ro
+    privileged: true  # Issue: Running privileged
+    # Issue: No resource limits
+    # Issue: Running as root
+    depends_on:
+      - db
+      - redis
+    restart: always
+
+  db:
+    image: postgres:14
+    environment:
+      # Issue: Hardcoded password
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: Password123!
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"  # Issue: Exposing DB port to host
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # Issue: No health check
+    # Issue: No security context
+
+  redis:
+    image: redis:latest  # Issue: Using latest tag
+    command: redis-server --requirepass redis_password_123  # Issue: Password in command
+    ports:
+      - "6379:6379"  # Issue: Exposing Redis port
+    # Issue: No authentication beyond password
+    # Issue: No resource limits
+
+  adminer:
+    image: adminer:latest  # Issue: Using latest tag
+    ports:
+      - "8081:8080"  # Issue: Exposing DB admin UI
+    # Issue: No authentication required
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+
+  nginx:
+    image: nginx:latest  # Issue: Using latest tag
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Issue: Mounting nginx config with secrets
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    # Issue: No read-only filesystem
+    # Issue: No security context
+
+volumes:
+  db_data:
+    # Issue: No encryption for volume
