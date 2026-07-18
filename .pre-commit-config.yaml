@@ -1,0 +1,39 @@
+# ============================================================
+# Pre-commit hook 配置 - 缺少安全检查
+# ============================================================
+
+# 这个 .pre-commit-config.yaml 故意缺少安全扫描
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      # 缺少以下安全相关的 hooks:
+      # - id: detect-secrets
+      # - id: gitleaks
+      # - id: trufflehog
+      # - id: bandit (Python SAST)
+      # - id: safety (依赖漏洞检查)
+
+  - repo: https://github.com/psf/black
+    rev: 23.3.0
+    hooks:
+      - id: black
+
+  # 缺少以下安全工具:
+  # - repo: https://github.com/PyCQA/bandit
+  #   hooks:
+  #     - id: bandit
+  #       args: ['-c', 'pyproject.toml']
+  #
+  # - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+  #   hooks:
+  #     - id: python-safety-dependencies-check
+  #
+  # - repo: https://github.com/gitleaks/gitleaks
+  #   hooks:
+  #     - id: gitleaks
