@@ -22,7 +22,7 @@ jobs:
     - name: Run AI code analysis
       env:
         LLM_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-        LLM_API_BASE: ${{ secrets.OCR_LLM_URL }}
+        LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
         LLM_API_TYPE: openai
         MODEL: "deepseek-v4-flash"
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
