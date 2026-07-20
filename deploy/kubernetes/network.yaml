@@ -1,63 +1,50 @@
 # ============================================================
-# Kubernetes Network Policies - Missing
+# 安全的 Kubernetes Network Policy & Ingress
 # ============================================================
-# Note: This file documents what's MISSING, not what's present.
-# The absence of NetworkPolicies is a security issue.
 
-# Should have:
-# - Default deny all ingress
-# - Default deny all egress
-# - Allow specific traffic between services
-
----
 # ============================================================
-# Kubernetes Pod Security Policy (deprecated but still relevant)
+# 基础 Network Policy - 默认拒绝所有流量
 # ============================================================
-apiVersion: policy/v1beta1
-kind: PodSecurityPolicy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: unrestricted-psp
+  name: default-deny-all
+  namespace: security-demo-app
 spec:
-  # Issue: Unrestricted PSP
-  privileged: true  # Issue: Allows privileged containers
-  allowPrivilegeEscalation: true  # Issue: Allows privilege escalation
-  allowedCapabilities:
-    - '*'  # Issue: All capabilities allowed
-  hostNetwork: true  # Issue: Host network access
-  hostPorts:
-    - min: 0
-      max: 65535  # Issue: All host ports
-  hostIPC: true  # Issue: Host IPC access
-  hostPID: true  # Issue: Host PID access
-  runAsUser:
-    rule: 'RunAsAny'  # Issue: Any user
-  seLinux:
-    rule: 'RunAsAny'  # Issue: No SELinux
-  fsGroup:
-    rule: 'RunAsAny'  # Issue: Any group
-  supplementalGroups:
-    rule: 'RunAsAny'  # Issue: Any group
-  volumes:
-    - '*'  # Issue: All volume types
-  allowedHostPaths:
-    - pathPrefix: '/'  # Issue: Any host path
-      readOnly: false  # Issue: Read-write access
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
 
 ---
 # ============================================================
-# Kubernetes Ingress with issues
+# 安全的 Ingress - 启用 TLS 和安全头
 # ============================================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: app-ingress
+  namespace: security-demo-app
   annotations:
-    # Issue: No TLS
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    # Issue: No rate limiting
-    # Issue: No authentication
-    # Issue: No CORS configuration
+    # 强制 HTTPS 重定向
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # 速率限制
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    # 安全头
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "DENY" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header Content-Security-Policy "default-src 'self'" always;
 spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - app.example.com
+    secretName: app-tls  # 使用 cert-manager 自动管理证书
   rules:
   - host: app.example.com
     http:
@@ -66,44 +53,106 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: app
+            name: app-service
             port:
-              number: 80
-  # Issue: No TLS configuration
-  # tls: []
+              number: 5000
 
 ---
 # ============================================================
-# Kubernetes CronJob with security issues
+# 安全的 ServiceAccount
+# ============================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-service-account
+  namespace: security-demo-app
+  annotations:
+    # 使用最小权限的角色
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/app-role
+automountServiceAccountToken: false
+
+---
+# ============================================================
+# CronJob - 安全配置
 # ============================================================
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: backup-job
+  namespace: security-demo-app
 spec:
   schedule: "0 * * * *"
   jobTemplate:
     spec:
       template:
         spec:
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
           containers:
           - name: backup
-            image: backup-tool:latest  # Issue: Using latest tag
-            env:
-            # Issue: Secrets in plain text
-            - name: DATABASE_URL
-              value: "postgres://admin:Password123!@db:5432/app"
-            - name: AWS_ACCESS_KEY
-              value: "AKIAIOSFODNN7EXAMPLE"
-            - name: AWS_SECRET_KEY
-              value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            image: backup-tool:1.0.0  # 使用特定版本
+            envFrom:
+            - secretRef:
+                name: backup-secrets  # 从 Secret 读取凭证
             command: ["/bin/bash", "-c"]
             args:
             - |
-              # Issue: Command injection potential if env vars are interpolated
               pg_dump $DATABASE_URL > /tmp/backup.sql
-              aws s3 cp /tmp/backup.sql s3://backup-bucket/
+              aws s3 cp /tmp/backup.sql s3://backup-bucket/ --sse AES256
+              rm /tmp/backup.sql
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                  - ALL
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "128Mi"
+              limits:
+                cpu: "500m"
+                memory: "256Mi"
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir:
+              sizeLimit: "100Mi"
           restartPolicy: OnFailure
-          # Issue: No security context
-          # Issue: No resource limits
-          # Issue: Running as root
+          serviceAccountName: backup-service-account
+
+---
+# ============================================================
+# SealedSecret - 加密的 Secret（替代明文 Secret）
+# ============================================================
+# 使用 Sealed Secrets 或 External Secrets Operator 管理敏感信息
+# apiVersion: bitnami.com/v1alpha1
+# kind: SealedSecret
+# metadata:
+#   name: app-secrets
+#   namespace: security-demo-app
+# spec:
+#   encryptedData:
+#     database-password: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq...
+#     api-key: AgBR0aXigW8UOZbXJFIE3h6F7a8b9c0d1e2f...
+#     jwt-secret: AgCH5j7k9l0m1n2o3p4q5r6s7t8u9v0w1x...
+
+---
+# ============================================================
+# Pod Disruption Budget - 确保高可用
+# ============================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app-pdb
+  namespace: security-demo-app
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: security-demo-app

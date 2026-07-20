@@ -1,166 +1,248 @@
 # ============================================================
-# Terraform configuration with security issues
+# 安全的 Terraform 配置
 # ============================================================
 
 terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
   }
-  # Issue 1: No backend encryption / no state locking
-  # backend "s3" {}
+
+  # 启用远程状态存储和加密
+  backend "s3" {
+    bucket         = "my-terraform-state-bucket"
+    key            = "security-demo-app/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"  # 状态锁
+  }
 }
 
 provider "aws" {
-  region = "us-east-1"
-  # Issue 2: Hardcoded credentials
-  access_key = "AKIAIOSFODNN7EXAMPLE"
-  secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  region = var.aws_region
+  # 不再硬编码凭证，使用 IAM 角色或环境变量
+  # 通过 AWS_PROFILE 或 IAM Role 认证
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  validation {
+    condition     = contains(["dev", "staging", "production"], var.environment)
+    error_message = "Environment must be dev, staging, or production."
+  }
+}
+
+variable "db_password" {
+  description = "Database password"
+  type        = string
+  sensitive   = true  # 标记为敏感变量
 }
 
 # ============================================================
-# S3 Bucket with public access
+# S3 Bucket - 加密 + 版本控制 + 访问日志
 # ============================================================
 resource "aws_s3_bucket" "data_bucket" {
-  bucket = "my-public-data-bucket-12345"
+  bucket = "${var.environment}-app-data-bucket-${data.aws_caller_identity.current.account_id}"
+}
 
-  # Issue 3: No server-side encryption
-  # Issue 4: No versioning
-  # Issue 5: No logging
+resource "aws_s3_bucket_versioning" "data_bucket" {
+  bucket = aws_s3_bucket.data_bucket.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "data_bucket" {
+  bucket = aws_s3_bucket.data_bucket.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+    bucket_key_enabled = true
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "data_bucket" {
   bucket = aws_s3_bucket.data_bucket.id
 
-  # Issue 6: Public access allowed
-  block_public_acls       = false
-  block_public_policy     = false
-  ignore_public_acls      = false
-  restrict_public_buckets = false
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
-resource "aws_s3_bucket_policy" "data_bucket_policy" {
+resource "aws_s3_bucket_logging" "data_bucket" {
   bucket = aws_s3_bucket.data_bucket.id
-
-  # Issue 7: Overly permissive bucket policy
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "PublicReadGetObject"
-        Effect    = "Allow"
-        Principal = "*"
-        Action    = "s3:GetObject"
-        Resource  = "${aws_s3_bucket.data_bucket.arn}/*"
-      }
-    ]
-  })
+  target_bucket = aws_s3_bucket.log_bucket.id
+  target_prefix = "s3-access-logs/"
 }
 
 # ============================================================
-# Security Group with overly permissive rules
+# 安全的 Security Group
 # ============================================================
 resource "aws_security_group" "web_sg" {
-  name = "web-security-group"
+  name_prefix = "${var.environment}-web-"
+  vpc_id      = aws_vpc.main.id
 
-  # Issue 8: Open to the world on all ports
+  # 仅允许必要的端口
   ingress {
-    from_port   = 0
-    to_port     = 65535
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS"
   }
 
-  # Issue 9: All outbound traffic
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTP (redirect to HTTPS)"
+  }
+
+  # 仅允许必要的出站流量
+  egress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS outbound"
+  }
+
+  egress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+    description = "Database access"
+  }
+
+  tags = {
+    Name        = "${var.environment}-web-sg"
+    Environment = var.environment
   }
 }
 
 # ============================================================
-# RDS with security issues
+# 安全的 RDS 数据库
 # ============================================================
 resource "aws_db_instance" "database" {
-  identifier     = "app-database"
+  identifier     = "${var.environment}-app-db"
   engine         = "mysql"
-  engine_version = "5.7"
-  instance_class = "db.t2.micro"
+  engine_version = "8.0"
+  instance_class = "db.t3.micro"
 
-  # Issue 10: Hardcoded credentials
+  # 从变量读取凭证
   username = "admin"
-  password = "Password123!"
+  password = var.db_password
 
-  # Issue 11: Publicly accessible
-  publicly_accessible = true
+  # 不公开访问
+  publicly_accessible = false
 
-  # Issue 12: No encryption
-  storage_encrypted = false
+  # 启用加密
+  storage_encrypted = true
+  kms_key_id        = aws_kms_key.db_key.arn
 
-  # Issue 13: No backup
-  backup_retention_period = 0
+  # 启用备份
+  backup_retention_period = 7
+  backup_window          = "03:00-04:00"
 
-  # Issue 14: Using default security group
-  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  # 启用删除保护
+  deletion_protection = true
 
-  # Issue 15: No deletion protection
-  deletion_protection = false
+  # 使用专用安全组
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
 
-  # Issue 16: Auto minor version upgrade disabled
-  auto_minor_version_upgrade = false
+  # 启用 IAM 数据库认证
+  iam_database_authentication_enabled = true
 
-  # Issue 17: No IAM authentication
-  iam_database_authentication_enabled = false
+  # 启用自动小版本升级
+  auto_minor_version_upgrade = true
+
+  # 启用性能洞察
+  performance_insights_enabled = true
+
+  # 启用监控
+  monitoring_interval = 60
+
+  # 标签
+  tags = {
+    Name        = "${var.environment}-database"
+    Environment = var.environment
+  }
 }
 
 # ============================================================
-# EC2 with security issues
+# 安全的 EC2 实例
 # ============================================================
 resource "aws_instance" "web_server" {
   ami           = "ami-0c55b159cbfafe1f0"
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"
 
-  # Issue 18: No key pair specified (SSM)
-  # Issue 19: Public IP
-  associate_public_ip_address = true
+  # 不分配公网 IP
+  associate_public_ip_address = false
+
+  # 使用 IAM 实例配置文件
+  iam_instance_profile = aws_iam_instance_profile.web_profile.name
 
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
-  # Issue 20: User data with secrets
+  # 不在用户数据中存储密钥
   user_data = <<-EOF
     #!/bin/bash
-    echo "AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE" >> /etc/environment
-    echo "AWS_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" >> /etc/environment
     yum install -y httpd
     systemctl start httpd
+    # 从 SSM Parameter Store 获取配置
+    # aws ssm get-parameter --name /app/config --with-decryption
   EOF
 
   root_block_device {
-    # Issue 21: No encryption
-    encrypted = false
+    encrypted = true
+  }
+
+  tags = {
+    Name        = "${var.environment}-web-server"
+    Environment = var.environment
   }
 }
 
 # ============================================================
-# IAM Policy with overly permissive access
+# 最小权限的 IAM 策略
 # ============================================================
-resource "aws_iam_policy" "admin_policy" {
-  name        = "AdminAccess"
-  description = "Full admin access"
+resource "aws_iam_policy" "app_policy" {
+  name        = "${var.environment}-app-policy"
+  description = "Application minimum required permissions"
 
-  # Issue 22: Overly permissive policy
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = "*"
-        Resource = "*"
-      }
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "${aws_s3_bucket.data_bucket.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+        ]
+        Resource = "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/app/*"
+      },
     ]
   })
 }
+
+data "aws_caller_identity" "current" {}

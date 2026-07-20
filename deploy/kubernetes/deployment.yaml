@@ -1,13 +1,20 @@
 # ============================================================
-# Kubernetes Deployment with security issues
+# 安全的 Kubernetes Deployment
 # ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-demo-app
+  labels:
+    name: security-demo-app
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: security-demo-app
-  namespace: default
+  namespace: security-demo-app  # 使用专用命名空间
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: security-demo-app
@@ -16,85 +23,231 @@ spec:
       labels:
         app: security-demo-app
     spec:
-      # Issue 1: Using default namespace
-      # Issue 2: No security context
+      # 使用专用 ServiceAccount
+      serviceAccountName: app-service-account
+      # Pod 级别安全上下文
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: app
-        image: security-demo-app:latest  # Issue 3: Using latest tag
+        image: security-demo-app:1.0.0  # 使用特定版本标签
         ports:
         - containerPort: 5000
-        - containerPort: 8080  # Issue 4: Exposing unnecessary ports
-        env:
-        # Issue 5: Secrets in plain text environment variables
-        - name: AWS_ACCESS_KEY_ID
-          value: "AKIAIOSFODNN7EXAMPLE"
-        - name: AWS_SECRET_ACCESS_KEY
-          value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        - name: DATABASE_PASSWORD
-          value: "admin:Password123!"
-        - name: SECRET_KEY
-          value: "super_secret_key_12345"
-        # Issue 6: No resource limits
-        # Issue 7: No liveness/readiness probes
-        # Issue 8: Running as root
+        # 从 Secret 引用环境变量
+        envFrom:
+        - secretRef:
+            name: app-secrets
+        - configMapRef:
+            name: app-config
+        # 容器级别安全上下文
         securityContext:
-          privileged: true  # Issue 9: Privileged container
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
           capabilities:
-            add: ["ALL"]  # Issue 10: All capabilities added
-          readOnlyRootFilesystem: false
-          runAsNonRoot: false
+            drop:
+              - ALL
+            add:
+              - NET_BIND_SERVICE
+        # 资源限制
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+            ephemeral-storage: "1Gi"
+        # 存活探针
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # 就绪探针
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # 启动探针
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 30
+        # 临时存储目录
         volumeMounts:
-        - name: docker-sock
-          mountPath: /var/run/docker.sock  # Issue 11: Docker socket mounted
+        - name: tmp
+          mountPath: /tmp
+      # 临时存储卷
       volumes:
-      - name: docker-sock
-        hostPath:
-          path: /var/run/docker.sock  # Issue 12: Host path mount
-          type: Socket
-      serviceAccountName: default  # Issue 13: Using default service account
+      - name: tmp
+        emptyDir:
+          sizeLimit: "100Mi"
+      # 拒绝调度到特定节点（可选）
+      # tolerations:
+      # - key: "dedicated"
+      #   operator: "Equal"
+      #   value: "app"
+      #   effect: "NoSchedule"
 ---
 # ============================================================
-# Kubernetes Service with NodePort (unnecessary exposure)
+# 安全的 Service - 使用 ClusterIP
 # ============================================================
 apiVersion: v1
 kind: Service
 metadata:
   name: security-demo-app-service
+  namespace: security-demo-app
 spec:
-  type: NodePort  # Issue 14: Using NodePort instead of ClusterIP
+  type: ClusterIP  # 仅集群内部访问
   ports:
   - port: 5000
     targetPort: 5000
-    nodePort: 30080  # Issue 15: Fixed NodePort
+    protocol: TCP
   selector:
     app: security-demo-app
 ---
 # ============================================================
-# Kubernetes ConfigMap with sensitive data
+# 安全的 ServiceAccount - 最小权限
 # ============================================================
 apiVersion: v1
-kind: ConfigMap
+kind: ServiceAccount
 metadata:
-  name: security-demo-config
-data:
-  # Issue 16: Sensitive data in ConfigMap instead of Secret
-  app.conf: |
-    database_url=postgres://admin:Password123@db:5432/myapp
-    redis_url=redis://:admin@redis:6379
-    api_key=sk_live_4eC39HqLyjWDarjtT1zdp7dc
+  name: app-service-account
+  namespace: security-demo-app
+  annotations:
+    # 如果使用 AWS IRSA，添加角色 ARN
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/ROLE
+automountServiceAccountToken: false  # 不自动挂载 Token
 ---
 # ============================================================
-# ClusterRoleBinding - excessive permissions
+# Network Policy - 默认拒绝所有流量
 # ============================================================
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: security-demo-admin
-subjects:
-- kind: ServiceAccount
-  name: default
-  namespace: default
-roleRef:
-  kind: ClusterRole
-  name: cluster-admin  # Issue 17: Overly permissive role
-  apiGroup: rbac.authorization.k8s.io
+  name: default-deny-all
+  namespace: security-demo-app
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# ============================================================
+# Network Policy - 允许特定流量
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-traffic
+  namespace: security-demo-app
+spec:
+  podSelector:
+    matchLabels:
+      app: security-demo-app
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 5000
+  egress:
+  # 允许 DNS 解析
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # 允许访问数据库
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+# ============================================================
+# 安全的 Ingress - 启用 TLS
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  namespace: security-demo-app
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "10"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    # 安全头
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "DENY" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - app.example.com
+    secretName: app-tls
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: security-demo-app-service
+            port:
+              number: 5000
+---
+# ============================================================
+# Network Policy for CronJob
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cronjob-egress
+  namespace: security-demo-app
+spec:
+  podSelector:
+    matchLabels:
+      app: backup-job
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
+    - protocol: TCP
+      port: 443
