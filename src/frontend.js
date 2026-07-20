@@ -1,171 +1,361 @@
 /**
- * Frontend JavaScript with security vulnerabilities
+ * Frontend JavaScript - secured against common vulnerabilities
  */
 
 // ============================================================
-// DOM-based XSS
+// 输入清理函数 - 防止 XSS
+// ============================================================
+function escapeHtml(str) {
+    if (typeof str !== 'string') return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function escapeAttr(str) {
+    if (typeof str !== 'string') return '';
+    return str.replace(/[&"'<>]/g, (c) => {
+        const map = { '&': '&amp;', '"': '&quot;', "'": '&#39;', '<': '&lt;', '>': '&gt;' };
+        return map[c];
+    });
+}
+
+// ============================================================
+// XSS 防护 - 使用 textContent 替代 innerHTML
 // ============================================================
 function updateUserProfile() {
     const name = document.getElementById('name').value;
     const bio = document.getElementById('bio').value;
 
-    // XSS: Direct innerHTML with user input
-    document.getElementById('profile').innerHTML = `
-        <h2>${name}</h2>
-        <p>${bio}</p>
-    `;
+    // 使用 DOM API 安全地设置内容，而非 innerHTML
+    const profile = document.getElementById('profile');
+    profile.innerHTML = ''; // 清空
+
+    const h2 = document.createElement('h2');
+    h2.textContent = name;
+    profile.appendChild(h2);
+
+    const p = document.createElement('p');
+    p.textContent = bio;
+    profile.appendChild(p);
 }
 
 function renderComment(comment) {
-    // XSS: Using document.write
-    document.write(`<div class="comment">${comment}</div>`);
+    // 使用 DOM API 替代 document.write（document.write 已废弃）
+    const div = document.createElement('div');
+    div.className = 'comment';
+    div.textContent = comment;
+    document.body.appendChild(div);
 }
 
 function setSearchResults(query) {
-    // XSS: DOM manipulation with unsanitized input
+    // 使用 textContent 安全地设置搜索结果
     const div = document.createElement('div');
-    div.innerHTML = `<p>Results for: ${query}</p>`;
+    const p = document.createElement('p');
+    p.textContent = `Results for: ${query}`;
+    div.appendChild(p);
     document.body.appendChild(div);
 }
 
 // ============================================================
-// Prototype pollution
+// 原型污染防护 - 阻止 __proto__ 和 __constructor__ 属性
 // ============================================================
-function mergeOptions(defaults, userOptions) {
-    // Prototype pollution: deep merge without sanitization
-    for (let key in userOptions) {
-        if (typeof userOptions[key] === 'object') {
-            defaults[key] = mergeOptions(defaults[key] || {}, userOptions[key]);
-        } else {
-            defaults[key] = userOptions[key];
-        }
-    }
-    return defaults;
+const BLOCKED_KEYS = new Set([
+    '__proto__', '__constructor__', '__defineGetter__',
+    '__defineSetter__', '__lookupGetter__', '__lookupSetter__',
+    'constructor', 'prototype'
+]);
+
+function isObject(item) {
+    return (item && typeof item === 'object' && !Array.isArray(item));
 }
 
-// Usage: mergeOptions({}, JSON.parse(userInput))
-// If userInput = {"__proto__": {"isAdmin": true}}, it pollutes Object.prototype
+function mergeOptions(defaults, userOptions) {
+    // 安全的深度合并 - 阻止原型污染
+    if (!isObject(defaults) || !isObject(userOptions)) {
+        throw new TypeError('Both arguments must be plain objects');
+    }
+
+    const result = { ...defaults };
+
+    for (const key of Object.keys(userOptions)) {
+        // 阻止危险的属性名
+        if (BLOCKED_KEYS.has(key) || key.startsWith('__')) {
+            console.warn(`Blocked potentially dangerous key: ${key}`);
+            continue;
+        }
+
+        if (isObject(userOptions[key])) {
+            result[key] = mergeOptions(result[key] || {}, userOptions[key]);
+        } else {
+            result[key] = userOptions[key];
+        }
+    }
+    return result;
+}
 
 // ============================================================
-// Insecure eval
+// 禁用 eval - 使用安全的替代方案
 // ============================================================
 function processTemplate(template, data) {
-    // Arbitrary code execution via eval
-    return eval('`' + template + '`');
+    // 使用模板字面量替代 eval
+    // 但仍然需要验证 template 不包含恶意内容
+    if (typeof template !== 'string' || typeof data !== 'object') {
+        throw new TypeError('Invalid arguments');
+    }
+    // 仅允许简单的占位符替换
+    let result = template;
+    for (const [key, value] of Object.entries(data)) {
+        const safeKey = escapeAttr(String(key));
+        const safeValue = escapeHtml(String(value));
+        result = result.replace(new RegExp(`\\{${safeKey}\\}`, 'g'), safeValue);
+    }
+    return result;
 }
 
 function dynamicCode(code) {
-    // Using Function constructor - similar to eval
-    const func = new Function('return ' + code);
-    return func();
+    // 已修复: 禁止使用 Function 构造函数执行任意代码
+    throw new Error('Dynamic code execution is disabled for security reasons');
 }
 
 // ============================================================
-// Client-side secret storage
+// 密钥管理 - 从服务端获取，不存储在客户端代码中
 // ============================================================
-const API_KEY = 'sk_live_4eC39HqLyjWDarjtT1zdp7dc';
-const JWT_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+// API 密钥和令牌应通过服务端代理获取，不应硬编码在前端代码中
+// 使用环境变量或服务端配置管理
 
-// Storing in localStorage (insecure)
+// 从服务端获取令牌（示例）
+async function getAuthToken() {
+    try {
+        const response = await fetch('/api/auth/token', {
+            method: 'GET',
+            credentials: 'same-origin', // 仅发送同源凭据
+        });
+        if (!response.ok) throw new Error('Failed to get auth token');
+        const data = await response.json();
+        return data.token;
+    } catch (error) {
+        console.error('Auth token error:', error);
+        return null;
+    }
+}
+
+// 安全地存储令牌 - 使用内存而非 localStorage
+let _authToken = null;
+
 function storeApiKey(key) {
-    localStorage.setItem('api_key', API_KEY);
-    localStorage.setItem('jwt', JWT_TOKEN);
-    sessionStorage.setItem('secret', 'super_secret_value');
+    // 仅存储在内存中，不使用 localStorage/sessionStorage
+    _authToken = key;
+    // 不在客户端持久化敏感令牌
 }
 
 // ============================================================
-// Insecure fetch requests
+// 安全的 fetch 请求 - 限制凭据和 URL
 // ============================================================
 function fetchData() {
-    // Sending credentials cross-origin
-    fetch('https://api.example.com/data', {
-        credentials: 'include',
-        mode: 'cors'
+    // 仅发送同源凭据
+    fetch('/api/data', {
+        credentials: 'same-origin', // 改为 same-origin
+        mode: 'cors',
     });
 
-    // SSRF potential: user-controlled URL
-    const url = document.getElementById('url-input').value;
-    fetch(url).then(r => r.text()).then(html => {
-        document.getElementById('output').innerHTML = html;
+    // 安全的数据获取 - 使用服务端代理而非客户端直接请求
+    // 用户输入的 URL 应通过服务端验证
+    const urlInput = document.getElementById('url-input').value;
+    // 通过代理端点获取，由服务端验证 URL
+    fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: urlInput }),
+        credentials: 'same-origin',
+    }).then(r => r.text()).then(text => {
+        const output = document.getElementById('output');
+        output.textContent = text; // 使用 textContent 而非 innerHTML
     });
 }
 
 // ============================================================
-// Open redirect
+// 开放重定向防护 - 验证重定向 URL
 // ============================================================
 function handleRedirect() {
     const params = new URLSearchParams(window.location.search);
     const returnUrl = params.get('return');
-    // Open redirect: no validation
     if (returnUrl) {
-        window.location.href = returnUrl;
+        // 验证重定向 URL 是相对路径或同源
+        try {
+            const url = new URL(returnUrl, window.location.origin);
+            if (url.origin === window.location.origin) {
+                // 同源重定向是安全的
+                window.location.href = url.pathname + url.search;
+            } else {
+                console.warn('Blocked external redirect:', returnUrl);
+            }
+        } catch (e) {
+            // 如果不是完整 URL，尝试作为相对路径
+            if (returnUrl.startsWith('/') && !returnUrl.startsWith('//')) {
+                window.location.href = returnUrl;
+            } else {
+                console.warn('Invalid redirect URL:', returnUrl);
+            }
+        }
     }
 }
 
 // ============================================================
-// Clickjacking (no frame protection)
+// Clickjacking 防护 - 通过 CSP frame-ancestors 实现
 // ============================================================
-// This page can be framed - vulnerable to clickjacking
-// Missing: X-Frame-Options header
-// Missing: CSP frame-ancestors directive
+// 注意: X-Frame-Options 和 CSP 应在服务端配置
+// 客户端可以通过以下方式检测是否在 iframe 中运行
+(function() {
+    if (window.self !== window.top) {
+        // 页面在 iframe 中运行，可能遭受点击劫持
+        console.warn('Page is running in an iframe - potential clickjacking');
+        // 可选: 拒绝在 iframe 中渲染
+        // document.body.innerHTML = '';
+    }
+})();
 
 // ============================================================
-// Insecure WebSocket
+// 安全的 WebSocket 连接 - 使用 WSS 和认证
 // ============================================================
 function connectWebSocket() {
-    // Connecting without TLS
-    const ws = new WebSocket('ws://websocket.example.com');
+    // 使用 WSS (TLS) 替代 WS
+    const ws = new WebSocket('wss://websocket.example.com');
 
     ws.onmessage = function(event) {
-        // XSS: rendering WebSocket message directly
-        document.getElementById('messages').innerHTML += event.data;
+        // 使用 textContent 而非 innerHTML
+        const messages = document.getElementById('messages');
+        const p = document.createElement('p');
+        p.textContent = event.data;
+        messages.appendChild(p);
     };
 
-    // No authentication token sent
+    // 发送认证令牌
     ws.onopen = function() {
+        // 从安全存储获取令牌
+        const token = getAuthToken();
         ws.send(JSON.stringify({
             action: 'subscribe',
-            channel: 'public'
+            channel: 'public',
+            token: token, // 发送认证令牌
         }));
+    };
+
+    // 添加错误处理
+    ws.onerror = function(error) {
+        console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = function(event) {
+        console.log('WebSocket closed:', event.code, event.reason);
     };
 }
 
 // ============================================================
-// Hardcoded secrets in JS
+// 安全的配置 - 不在客户端暴露敏感配置
 // ============================================================
+// 配置应通过服务端 API 获取
 const CONFIG = {
-    firebaseApiKey: "AIzaSyD-example-key-1234567890",
-    firebaseAuthDomain: "myapp-12345.firebaseapp.com",
-    firebaseProjectId: "myapp-12345",
-    stripePublishableKey: "pk_live_abc123def456ghi789",
-    googleAnalyticsId: "UA-123456789-1",
-    sentryDsn: "https://abc123@o12345.ingest.sentry.io/12345"
+    // 以下配置项应通过服务端代理获取
+    // firebaseApiKey: 通过服务端代理
+    // stripePublishableKey: 仅公钥可以暴露
+    stripePublishableKey: getEnvironmentConfig('STRIPE_PUBLISHABLE_KEY'),
 };
 
+// 从服务端获取配置
+async function getEnvironmentConfig(key) {
+    try {
+        const response = await fetch(`/api/config/${key}`, {
+            credentials: 'same-origin',
+        });
+        const data = await response.json();
+        return data.value;
+    } catch {
+        return null;
+    }
+}
+
 // ============================================================
-// Insecure postMessage handling
+// 安全的 postMessage 处理 - 验证来源
 // ============================================================
+const ALLOWED_ORIGINS = new Set([
+    'https://app.example.com',
+    'https://www.example.com',
+]);
+
 window.addEventListener('message', function(event) {
-    // No origin validation
-    // XSS: executing code from untrusted messages
-    if (event.data.action === 'eval') {
-        eval(event.data.code);
+    // 验证消息来源
+    if (!ALLOWED_ORIGINS.has(event.origin)) {
+        console.warn('Blocked message from untrusted origin:', event.origin);
+        return;
     }
-    if (event.data.action === 'navigate') {
-        window.location.href = event.data.url;
+
+    // 验证消息格式
+    if (!event.data || typeof event.data !== 'object') {
+        return;
     }
+
+    // 仅允许预定义的安全操作
+    switch (event.data.action) {
+        case 'update':
+            // 安全地更新 UI
+            if (typeof event.data.payload === 'string') {
+                document.getElementById('output').textContent = event.data.payload;
+            }
+            break;
+        case 'navigate':
+            // 仅允许同源导航
+            if (typeof event.data.url === 'string') {
+                handleRedirect(); // 使用已验证的重定向逻辑
+            }
+            break;
+        default:
+            console.warn('Unknown message action:', event.data.action);
+    }
+    // 移除了 eval 和任意导航功能
 });
 
 // ============================================================
-// Clipboard XSS
+// 安全的剪贴板操作
 // ============================================================
 function copyToClipboard(text) {
-    // Potential XSS via clipboard
-    navigator.clipboard.writeText(text);
+    // 验证输入类型
+    if (typeof text !== 'string') {
+        console.error('Invalid text for clipboard');
+        return;
+    }
+    // 使用现代 Clipboard API
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(err => {
+            console.error('Failed to copy:', err);
+        });
+    } else {
+        // 降级方案
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+        } catch (err) {
+            console.error('Copy failed:', err);
+        }
+        document.body.removeChild(textarea);
+    }
 }
 
 // ============================================================
-// Weak CSP bypass techniques
+// Content Security Policy 建议（应在服务端配置）
 // ============================================================
-// This inline script bypasses CSP if 'unsafe-inline' is used
-// <script>document.cookie = "session=stolen"</script>
+// 建议的 CSP 头:
+// Content-Security-Policy:
+//   default-src 'self';
+//   script-src 'self' 'nonce-{random}';
+//   style-src 'self' 'unsafe-inline';
+//   img-src 'self' data: https:;
+//   connect-src 'self' https://api.example.com;
+//   frame-ancestors 'none';
+//   base-uri 'self';
+//   form-action 'self';

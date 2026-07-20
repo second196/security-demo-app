@@ -1,5 +1,5 @@
 # ============================================================
-# .gitignore with issues - should exclude secrets but doesn't
+# .gitignore - 排除敏感文件和构建产物
 # ============================================================
 
 # Python
@@ -10,10 +10,12 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.egg
 
 # Virtual environments
 venv/
 env/
+.venv/
 .env
 
 # IDE
@@ -21,16 +23,55 @@ env/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Note: This .gitignore intentionally does NOT exclude:
-# - .env files (should be excluded)
-# - secrets.* files (should be excluded)
-# - *.pem files (should be excluded)
-# - *.key files (should be excluded)
-# - credentials.json (should be excluded)
-# - terraform.tfstate (should be excluded)
-# - kubeconfig (should be excluded)
+# 安全敏感文件 - 必须排除
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials.json
+service-account*.json
+*-credentials.json
+backup.env
+*.env.local
+*.env.production
+kubeconfig
+config/kubeconfig
+config/id_ed25519
+config/server.pem
+config/credentials.json
+config/backup.env
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!example.tfvars
+
+# 密钥文件
+secrets.*
+*.secret
+*.secrets
+private.key
+id_rsa
+id_ed25519
+id_ecdsa
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+temp/
+
+# Docker
+docker-compose.override.yml
+
+# Kubernetes secrets (应使用 External Secrets Operator)
+# deploy/kubernetes/*-secrets.yaml  # 如果不使用 sealed-secrets

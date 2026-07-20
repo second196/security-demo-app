@@ -1,128 +1,165 @@
 # ============================================================
-# Ansible Playbook with security issues
+# 安全的 Ansible Playbook
 # ============================================================
 ---
 - name: Deploy application server
   hosts: all
-  become: yes  # Issue 1: Running everything as root
+  become: yes
+  become_method: sudo
+
+  vars_files:
+    # 从外部文件读取敏感信息（不硬编码在 playbook 中）
+    - vars/secrets.yml
 
   vars:
-    # Issue 2: Hardcoded secrets in playbook
     app_name: security-demo-app
     app_port: 5000
-    database_host: db.example.com
+    app_user: appuser
+    app_group: appuser
+    database_host: "{{ vault_database_host }}"
     database_port: 5432
-    database_user: admin
-    database_password: "Password123!"
-    aws_access_key: "AKIAIOSFODNN7EXAMPLE"
-    aws_secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    redis_password: "redis_password_123"
-    secret_key: "super_secret_key_12345"
-    api_token: "ghp_ABCDEFGHIJKLMNOPqrstuvwxyz123456"
+    database_user: "{{ vault_database_user }}"
+    database_password: "{{ vault_database_password }}"
+    redis_password: "{{ vault_redis_password }}"
+    secret_key: "{{ vault_secret_key }}"
 
   tasks:
-    # Issue 3: Insecure apt update
+    # ============================================================
+    # 系统安全配置
+    # ============================================================
     - name: Update apt cache
       apt:
         update_cache: yes
+        cache_valid_time: 3600
 
-    # Issue 4: Installing insecure packages
-    - name: Install system packages
+    - name: Install security packages
       apt:
         name:
           - nginx
           - python3
           - python3-pip
+          - python3-venv
           - git
           - curl
-          - wget
-          - nmap  # Issue 5: Installing security scanning tool on prod
-          - netcat  # Issue 6: Installing netcat
-          - telnet  # Issue 7: Installing telnet
+          - ufw
+          - fail2ban
+          - unattended-upgrades
         state: present
 
-    # Issue 8: Cloning repo without verifying SSH host keys
+    # ============================================================
+    # 用户和权限管理
+    # ============================================================
+    - name: Create application user
+      user:
+        name: "{{ app_user }}"
+        shell: /bin/false
+        system: yes
+        create_home: no
+        groups: ""  # 不加入 sudo 组
+
+    # ============================================================
+    # 应用部署（使用 venv 隔离依赖）
+    # ============================================================
     - name: Clone application repository
       git:
         repo: "https://github.com/example/app.git"
         dest: /opt/app
         version: main
-        # Issue 9: No depth parameter
-        # Issue 10: Force yes without verification
+        depth: 1  # 浅克隆
+      become_user: "{{ app_user }}"
 
-    # Issue 11: Writing secrets to files
+    - name: Create Python virtual environment
+      command: python3 -m venv /opt/app/venv
+      args:
+        creates: /opt/app/venv/bin/activate
+      become_user: "{{ app_user }}"
+
+    - name: Install Python dependencies in venv
+      pip:
+        requirements: /opt/app/requirements.txt
+        virtualenv: /opt/app/venv
+      become_user: "{{ app_user }}"
+
+    # ============================================================
+    # 安全的配置文件管理
+    # ============================================================
     - name: Create environment file
       copy:
         content: |
           DATABASE_URL=postgres://{{ database_user }}:{{ database_password }}@{{ database_host }}:{{ database_port }}/app
-          AWS_ACCESS_KEY={{ aws_access_key }}
-          AWS_SECRET_KEY={{ aws_secret_key }}
           REDIS_PASSWORD={{ redis_password }}
           SECRET_KEY={{ secret_key }}
-          API_TOKEN={{ api_token }}
         dest: /opt/app/.env
-        owner: root
-        group: root
-        mode: '0644'  # Issue 12: World-readable secrets
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0600'  # 仅所有者可读写
 
-    # Issue 13: Insecure pip install
-    - name: Install Python dependencies
-      pip:
-        requirements: /opt/app/requirements.txt
-        # Issue 14: No --break-system-packages or venv
-
-    # Issue 15: Insecure service configuration
+    # ============================================================
+    # Nginx 配置
+    # ============================================================
     - name: Configure nginx
       template:
         src: nginx.conf.j2
         dest: /etc/nginx/sites-available/app
+        owner: root
+        group: root
+        mode: '0644'
       notify: Restart nginx
 
-    # Issue 16: Enabling site without security headers
     - name: Enable nginx site
       file:
         src: /etc/nginx/sites-available/app
         dest: /etc/nginx/sites-enabled/app
         state: link
+        owner: root
+        group: root
+      notify: Restart nginx
 
-    # Issue 17: Starting service with no firewall
+    # ============================================================
+    # 防火墙配置
+    # ============================================================
+    - name: Configure UFW
+      ufw:
+        direction: "{{ item.direction }}"
+        rule: "{{ item.rule }}"
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop:
+        - { direction: incoming, rule: allow, port: '22', proto: tcp }
+        - { direction: incoming, rule: allow, port: '80', proto: tcp }
+        - { direction: incoming, rule: allow, port: '443', proto: tcp }
+        - { direction: incoming, rule: deny, port: any, proto: any }
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # ============================================================
+    # Fail2Ban 配置
+    # ============================================================
+    - name: Configure fail2ban
+      template:
+        src: jail.local.j2
+        dest: /etc/fail2ban/jail.local
+      notify: Restart fail2ban
+
+    # ============================================================
+    # 服务管理
+    # ============================================================
     - name: Start application service
       systemd:
         name: app
         state: started
         enabled: yes
-
-    # Issue 18: No firewall configuration
-    - name: Allow all incoming traffic
-      ufw:
-        rule: allow
-        direction: incoming
-
-    # Issue 19: Downloading and executing scripts
-    - name: Install monitoring agent
-      shell: |
-        curl -sSL https://install.example.com/agent.sh | bash
-      args:
-        creates: /opt/agent/installed
-
-    # Issue 20: Creating admin user with weak password
-    - name: Create admin user
-      user:
-        name: admin
-        password: "{{ 'admin123' | password_hash('sha512') }}"
-        shell: /bin/bash
-        groups: sudo
-        append: yes
-
-    # Issue 21: SSH key without restricting permissions
-    - name: Deploy SSH key
-      authorized_key:
-        user: admin
-        key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... admin@company.com"
-        state: present
+      notify: Restart nginx
 
   handlers:
     - name: Restart nginx
       systemd:
         name: nginx
+        state: restarted
+
+    - name: Restart fail2ban
+      systemd:
+        name: fail2ban
         state: restarted

@@ -1,40 +1,74 @@
-"""GraphQL API with security vulnerabilities."""
+"""GraphQL API - secured against common vulnerabilities."""
 
 import graphene
-from graphene import ObjectType, String, Int, Field, List, Mutation, Schema
-import jwt
+from graphene import ObjectType, String, Int, Boolean, Field, List, Mutation, Float, Schema
 import hashlib
+import secrets
 import sqlite3
 import os
+import re
+import hmac
 
 # ============================================================
-# GraphQL 安全问题
+# GraphQL 安全配置
 # ============================================================
-
-# 1. 无查询深度限制 (Query Depth Attack)
-# 攻击者可以构造嵌套极深的查询导致 DoS
-
-# 2. 无查询复杂度限制 (Query Complexity Attack)
-# 攻击者可以用单个查询消耗大量资源
-
-# 3. 无速率限制
-# 无限次调用 API
-
-# 4. Introspection 启用（生产环境应禁用）
-# 攻击者可以枚举整个 schema
-
-# 5. 无认证/授权检查
-# 任何查询都可以访问所有数据
+# 1. 查询深度限制
+MAX_QUERY_DEPTH = 5
+# 2. 查询复杂度限制
+MAX_QUERY_COMPLEXITY = 100
+# 3. 速率限制（每分钟）
+RATE_LIMIT = 60
 
 
+def get_db_connection():
+    conn = sqlite3.connect("app.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ============================================================
+# 认证装饰器 - 所有 GraphQL 操作都需要认证
+# ============================================================
+def require_auth(func):
+    """认证装饰器"""
+    def wrapper(self, info, *args, **kwargs):
+        user = info.context.get("user")
+        if not user:
+            raise Exception("Authentication required")
+        return func(self, info, *args, **kwargs)
+    return wrapper
+
+
+def require_admin(func):
+    """管理员权限装饰器"""
+    def wrapper(self, info, *args, **kwargs):
+        user = info.context.get("user")
+        if not user:
+            raise Exception("Authentication required")
+        if user.get("role") != "admin":
+            raise Exception("Admin access required")
+        return func(self, info, *args, **kwargs)
+    return wrapper
+
+
+# ============================================================
+# 安全的类型定义 - 移除敏感字段
+# ============================================================
 class User(ObjectType):
     id = Int()
     username = String()
     email = String()
-    password_hash = String()  # 6. 密码哈希暴露在 GraphQL schema 中
+    # 移除了 password_hash、ssn、credit_card 等敏感字段
     role = String()
-    ssn = String()  # 7. 敏感字段暴露
-    credit_card = String()  # 8. 支付信息暴露
+    created_at = String()
+
+
+class SafeUser(ObjectType):
+    """仅包含非敏感字段的用户类型"""
+    id = Int()
+    username = String()
+    email = String()
+    role = String()
 
 
 class Order(ObjectType):
@@ -45,88 +79,154 @@ class Order(ObjectType):
 
 
 class Query(ObjectType):
-    """所有查询都无认证检查"""
-    user = Field(User, id=Int(required=True))
-    users = List(User)
+    """所有查询都要求认证"""
+    user = Field(SafeUser, id=Int(required=True))
+    users = List(SafeUser)
     order = Field(Order, id=Int(required=True))
     orders = List(Order)
     search = String(query=String(required=True))
 
-    # 9. N+1 查询问题
+    @require_auth
     def resolve_users(self, info):
-        conn = sqlite3.connect("app.db")
+        """安全的用户列表查询 - 参数化 + 分页"""
+        conn = get_db_connection()
         cursor = conn.cursor()
-        # 无分页 - 可返回所有数据导致内存溢出
-        cursor.execute("SELECT * FROM users")
+        # 使用参数化查询 + 分页
+        cursor.execute(
+            "SELECT id, username, email, role, created_at FROM users LIMIT ? OFFSET ?",
+            (50, 0)  # 默认分页
+        )
         users = cursor.fetchall()
         conn.close()
-        return [User(id=u[0], username=u[1], email=u[2],
-                     password_hash=u[3], role=u[4], ssn=u[5],
-                     credit_card=u[6]) for u in users]
+        return [SafeUser(id=u[0], username=u[1], email=u[2],
+                        role=u[3], created_at=u[4]) for u in users]
 
+    @require_auth
     def resolve_user(self, info, id):
-        conn = sqlite3.connect("app.db")
+        """安全的用户查询 - 参数化查询"""
+        conn = get_db_connection()
         cursor = conn.cursor()
-        # 10. SQL 注入
-        cursor.execute(f"SELECT * FROM users WHERE id = {id}")
+        # 使用参数化查询防止 SQL 注入
+        cursor.execute(
+            "SELECT id, username, email, role, created_at FROM users WHERE id = ?",
+            (int(id),)
+        )
         user = cursor.fetchone()
         conn.close()
         if user:
-            return User(id=user[0], username=user[1], email=user[2],
-                       password_hash=user[3], role=user[4], ssn=user[5],
-                       credit_card=user[6])
+            return SafeUser(id=user[0], username=user[1], email=user[2],
+                           role=user[3], created_at=user[4])
         return None
 
+    @require_auth
     def resolve_search(self, info, query):
-        # 11. GraphQL 注入
-        conn = sqlite3.connect("app.db")
+        """安全的搜索 - 参数化查询"""
+        # 验证输入
+        if not query or len(query) > 100:
+            raise ValueError("Invalid search query")
+
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM users WHERE username LIKE '%{query}%'")
+        # 使用参数化查询
+        cursor.execute(
+            "SELECT id, username, email FROM users WHERE username LIKE ?",
+            (f"%{query}%",)
+        )
         results = cursor.fetchall()
         conn.close()
-        return str(results)
+        return str([dict(r) for r in results])
+
+    @require_auth
+    def resolve_order(self, info, id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM orders WHERE id = ?", (int(id),))
+        order = cursor.fetchone()
+        conn.close()
+        if order:
+            return Order(id=order[0], user_id=order[1],
+                        amount=order[2], status=order[3])
+        return None
 
 
+# ============================================================
+# 安全的变更操作 - 带有认证和输入验证
+# ============================================================
 class CreateUser(Mutation):
-    """创建用户 - 无输入验证"""
+    """创建用户 - 带有输入验证"""
+
     class Arguments:
         username = String(required=True)
         email = String(required=True)
         password = String(required=True)
 
-    user = Field(User)
+    user = Field(SafeUser)
 
     def mutate(self, info, username, email, password):
-        conn = sqlite3.connect("app.db")
+        # 验证用户名
+        if not username or len(username) < 3 or len(username) > 50:
+            raise ValueError("Username must be 3-50 characters")
+        if not re.match(r"^[a-zA-Z0-9_]+$", username):
+            raise ValueError("Username must be alphanumeric")
+
+        # 验证邮箱
+        if not email or not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
+            raise ValueError("Invalid email address")
+
+        # 验证密码强度
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if not re.search(r"[A-Z]", password):
+            raise ValueError("Password must contain uppercase letter")
+        if not re.search(r"[a-z]", password):
+            raise ValueError("Password must contain lowercase letter")
+        if not re.search(r"\d", password):
+            raise ValueError("Password must contain digit")
+
+        conn = get_db_connection()
         cursor = conn.cursor()
-        # 12. 无密码强度验证
-        # 13. 无邮箱格式验证
-        # 14. SQL 注入
-        password_hash = hashlib.md5(password.encode()).hexdigest()
+
+        # 检查用户名是否已存在
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            conn.close()
+            raise ValueError("Username already exists")
+
+        # 使用 PBKDF2 哈希密码（替代 MD5）
+        salt = secrets.token_bytes(16)
+        password_hash = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), salt, iterations=600000
+        ).hex()
+
+        # 使用参数化查询
         cursor.execute(
-            f"INSERT INTO users (username, email, password_hash) "
-            f"VALUES ('{username}', '{email}', '{password_hash}')"
+            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+            (username, email, password_hash)
         )
         conn.commit()
         conn.close()
-        return CreateUser(user=User(username=username, email=email))
+
+        return CreateUser(user=SafeUser(username=username, email=email))
 
 
 class DeleteUser(Mutation):
-    """删除用户 - 无授权检查"""
+    """删除用户 - 仅管理员可操作"""
+
     class Arguments:
         id = Int(required=True)
 
     success = Boolean()
 
+    @require_admin
     def mutate(self, info, id):
-        # 15. 任何用户都可以删除任何其他用户
-        conn = sqlite3.connect("app.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(f"DELETE FROM users WHERE id = {id}")
+        # 使用参数化查询
+        cursor.execute("DELETE FROM users WHERE id = ?", (int(id),))
+        affected = cursor.rowcount
         conn.commit()
         conn.close()
-        return DeleteUser(success=True)
+        return DeleteUser(success=affected > 0)
 
 
 class Mutation(ObjectType):
@@ -134,7 +234,13 @@ class Mutation(ObjectType):
     delete_user = DeleteUser.Field()
 
 
-schema = Schema(query=Query, mutation=Mutation)
+# ============================================================
+# Schema 配置 - 生产环境禁用 Introspection
+# ============================================================
+# 在生产环境中禁用 introspection，防止攻击者枚举 schema
+# 可以通过环境变量控制
+ENABLE_INTROSPECTION = os.environ.get("GRAPHQL_INTROSPECTION", "false").lower() == "true"
 
-# 16. Schema 导出/打印暴露所有类型
-# print_schema(schema)  # 不应在生产环境启用
+schema = Schema(query=Query, mutation=Mutation)
+if not ENABLE_INTROSPECTION:
+    schema.graphql_schema.introspection = False

@@ -1,158 +1,165 @@
 # ============================================================
-# CloudFormation Template with security issues
+# 安全的 CloudFormation Template
 # ============================================================
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Security Demo Application Stack'
+Description: 'Security Demo Application Stack - Secured'
 
 Parameters:
-  # Issue 1: Default password in parameters
   DatabasePassword:
     Type: String
-    Default: 'Password123!'
-    NoEcho: false  # Issue 2: NoEcho not set to true
-    Description: Database password
+    NoEcho: true  # 隐藏参数值
+    MinLength: 12
+    Description: Database password (minimum 12 characters)
+    AllowedPattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$'
+    ConstraintDescription: Must contain at least 12 characters with uppercase, lowercase, number, and special character
 
   Environment:
     Type: String
-    Default: 'production'
+    Default: 'staging'
+    AllowedValues:
+      - dev
+      - staging
+      - production
 
 Resources:
   # ============================================================
-  # S3 Bucket - Public and unencrypted
+  # 安全的 S3 Bucket
   # ============================================================
   AppBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub '${Environment}-app-bucket-${AWS::AccountId}'
-      # Issue 3: No encryption configuration
-      # Issue 4: No versioning
-      # Issue 5: No access logging
-      # Issue 6: No lifecycle rules
+      # 启用版本控制
+      VersioningConfiguration:
+        Status: Enabled
+      # 启用服务端加密
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref BucketEncryptionKey
+      # 启用访问日志
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: 's3-access-logs/'
+      # 禁用公共访问
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: false  # Issue 7: Public access allowed
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   # ============================================================
-  # Security Group - Overly permissive
+  # 安全的 Security Group
   # ============================================================
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: 'Web server security group'
       SecurityGroupIngress:
-        # Issue 8: All ports open to 0.0.0.0/0
+        # 仅允许 HTTPS
         - IpProtocol: tcp
-          FromPort: 0
-          ToPort: 65535
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
-        # Issue 9: SSH open to world
+          Description: 'HTTPS access'
+        # 仅允许 HTTP（用于重定向）
         - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
+          FromPort: 80
+          ToPort: 80
           CidrIp: 0.0.0.0/0
+          Description: 'HTTP redirect to HTTPS'
 
   # ============================================================
-  # RDS Database
+  # 安全的 RDS 数据库
   # ============================================================
   AppDatabase:
     Type: AWS::RDS::DBInstance
     Properties:
       DBInstanceIdentifier: !Sub '${Environment}-app-db'
       Engine: mysql
-      EngineVersion: '5.7'
-      DBInstanceClass: db.t2.micro
+      EngineVersion: '8.0'
+      DBInstanceClass: db.t3.micro
       MasterUsername: admin
-      # Issue 10: Hardcoded password in template
       MasterUserPassword: !Ref DatabasePassword
-      # Issue 11: Publicly accessible
-      PubliclyAccessible: true
-      # Issue 12: No encryption
-      StorageEncrypted: false
-      # Issue 13: No backup
-      BackupRetentionPeriod: 0
-      # Issue 14: No deletion protection
-      DeletionProtection: false
+      # 不公开访问
+      PubliclyAccessible: false
+      # 启用加密
+      StorageEncrypted: true
+      # 启用备份
+      BackupRetentionPeriod: 7
+      # 启用删除保护
+      DeletionProtection: true
+      # 使用专用安全组
       VPCSecurityGroups:
         - !Ref WebSecurityGroup
-      # Issue 15: No IAM auth
-      EnableIAMDatabaseAuthentication: false
-      # Issue 16: Auto minor version upgrade disabled
-      AutoMinorVersionUpgrade: false
+      # 启用 IAM 数据库认证
+      EnableIAMDatabaseAuthentication: true
+      # 启用自动小版本升级
+      AutoMinorVersionUpgrade: true
 
   # ============================================================
-  # EC2 Instance
+  # 安全的 EC2 实例
   # ============================================================
   WebServer:
     Type: AWS::EC2::Instance
     Properties:
-      InstanceType: t2.micro
+      InstanceType: t3.micro
       ImageId: ami-0c55b159cbfafe1f0
-      # Issue 17: No monitoring enabled
-      Monitoring: false
+      # 启用监控
+      Monitoring: true
       SecurityGroupIds:
         - !Ref WebSecurityGroup
-      # Issue 18: User data with secrets
+      # 不在用户数据中存储密钥
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          echo "DB_PASSWORD=${DatabasePassword}" >> /etc/environment
-          echo "AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE" >> /etc/environment
           yum install -y httpd
           systemctl start httpd
-
-      # Issue 19: No IAM instance profile
-      # Issue 20: No root volume encryption
+          # 从 SSM Parameter Store 获取配置
+          # aws ssm get-parameter --name /app/config --with-decryption
+      # 使用 IAM 实例配置文件
+      IamInstanceProfile: !Ref WebInstanceProfile
+      # 启用根卷加密
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
-            VolumeSize: 8
-            VolumeType: gp2
-            # Issue 21: No encryption
-            Encrypted: false
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
 
   # ============================================================
-  # IAM Policy - Overly permissive
+  # 最小权限的 IAM 策略
   # ============================================================
-  AdminPolicy:
+  AppPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: AdminAccess
+      PolicyName: !Sub '${Environment}-app-policy'
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # Issue 22: Wildcard permissions
           - Effect: Allow
-            Action: '*'
-            Resource: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub '${AppBucket.Arn}/*'
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/app/*'
 
   # ============================================================
-  # API Gateway - No authentication
-  # ============================================================
-  PublicAPI:
-    Type: AWS::ApiGateway::RestApi
-    Properties:
-      Name: !Sub '${Environment}-public-api'
-      # Issue 23: No authorization configured
-      EndpointConfiguration:
-        types:
-          - REGIONAL
-
-  # ============================================================
-  # CloudWatch Log Group - No retention
+  # CloudWatch 日志保留
   # ============================================================
   AppLogs:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/${Environment}/app'
-      # Issue 24: No retention policy (infinite retention)
-      # RetentionInDays: 30
+      RetentionInDays: 30  # 30 天保留期
 
 Outputs:
-  # Issue 25: Outputting sensitive values
   DatabaseEndpoint:
     Value: !Ref AppDatabase
-  DatabasePassword:
-    Value: !Ref DatabasePassword
-    Description: 'Database password (insecure output)'
+    Description: 'Database endpoint'
+  # 不输出敏感值
+  # DatabasePassword 已通过 NoEcho 隐藏
