@@ -1,0 +1,355 @@
+# ============================================================
+# Security Scan - 多工具安全扫描统一工作流
+# 工具：Semgrep, Trivy, Gitleaks, PR-Agent, GitO, OpenCodeReview
+# 输出：各工具原始 JSON 格式，分别保存为 Artifact
+# ============================================================
+
+name: Security Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull Request number (workflow_dispatch 时必填)"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# ────────────────────────────────────────────────────────────
+# Job 1: Semgrep (SAST)
+# ────────────────────────────────────────────────────────────
+jobs:
+  semgrep:
+    name: "🔍 Semgrep SAST"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            semgrep/semgrep semgrep \
+              --config=auto \
+              --json \
+              --output /src/semgrep-report.json \
+              . || true
+          [ ! -f semgrep-report.json ] && echo '{}' > semgrep-report.json
+
+      - name: Upload Semgrep Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 2: Trivy (SCA + 依赖漏洞)
+  # ──────────────────────────────────────────────────────────
+  trivy:
+    name: "🧰 Trivy SCA"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy Filesystem Scan
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            aquasec/trivy fs /src \
+              --format json \
+              --output /src/trivy-report.json || true
+          [ ! -f trivy-report.json ] && echo '{}' > trivy-report.json
+
+      - name: Upload Trivy Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 3: Gitleaks (密钥泄露)
+  # ──────────────────────────────────────────────────────────
+  gitleaks:
+    name: "🔑 Gitleaks Secrets"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Run Gitleaks
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            zricethezav/gitleaks detect \
+              --source=/repo \
+              --report-format json \
+              --report-path /repo/gitleaks-report.json || true
+          [ ! -f gitleaks-report.json ] && echo '{}' > gitleaks-report.json
+
+      - name: Upload Gitleaks Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 4: PR-Agent (AI 安全审查)
+  # ──────────────────────────────────────────────────────────
+  pr-agent:
+    name: "🤖 PR-Agent Review"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine PR Number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Install PR-Agent
+        run: |
+          pip install pr-agent
+          pip install "httpx==0.27.2"
+
+      - name: Create PR-Agent Secrets
+        run: |
+          SITE_PACKAGES=$(python3 -c "import pr_agent; import os; print(os.path.dirname(pr_agent.__file__))")
+          cat > "$SITE_PACKAGES/settings/.secrets.toml" <<EOF
+          [openai]
+          key = "${{ secrets.OCR_LLM_AUTH_TOKEN }}"
+          api_base = "${{ secrets.LLM_API_BASE }}"
+          [github]
+          user_token = "${{ secrets.PAT_TOKEN }}"
+          deployment_type = "user"
+          EOF
+
+      - name: Create PR-Agent Config
+        run: |
+          cat > .pr_agent.toml <<EOF
+          [config]
+          model = "openai/deepseek-v4-flash"
+          model_turbo = "openai/deepseek-v4-flash"
+          custom_model_api_base = "${{ secrets.LLM_API_BASE }}"
+          custom_model_max_tokens = 32000
+          fallback_models = ["openai/deepseek-v4-flash"]
+          [pr_reviewer]
+          security_focus = true
+          require_security_review = true
+          EOF
+
+      - name: Run PR-Agent Review
+        run: |
+          python -m pr_agent.cli \
+            --pr_url="https://github.com/${{ github.repository }}/pull/${{ steps.pr.outputs.number }}" \
+            review \
+            --config.publish_output=false \
+            2>&1 | tee pr-agent-stdout.log || true
+          echo '{}' > pr-agent-report.json
+
+      - name: Upload PR-Agent Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-agent-report
+          path: |
+            pr-agent-report.json
+            pr-agent-stdout.log
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 5: GitO (AI Code Review)
+  # ──────────────────────────────────────────────────────────
+  gito:
+    name: "🧠 GitO Review"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Determine PR Number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+
+      - name: Install GitO
+        run: pip install "gito.bot~=4.4"
+
+      - name: Run GitO Review
+        env:
+          LLM_API_KEY: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
+          LLM_API_TYPE: openai
+          MODEL: "deepseek-v4-flash"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gito --verbose review || true
+          if [ -f code-review-report.json ]; then
+            echo "GitO review completed, report saved."
+          else
+            echo '{"error": "No report generated"}' > code-review-report.json
+          fi
+
+      - name: Upload GitO Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gito-report
+          path: |
+            code-review-report.json
+            code-review-report.md
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 6: OpenCodeReview (阿里 AI 代码审查)
+  # ──────────────────────────────────────────────────────────
+  open-code-review:
+    name: "🔎 OpenCodeReview"
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine PR context
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenCodeReview
+        id: ocr
+        uses: alibaba/open-code-review@main
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL || 'deepseek-v4-flash' }}
+          llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
+          base_ref: ${{ github.base_ref }}
+          head_sha: ${{ steps.pr.outputs.head_sha }}
+
+      - name: Save OpenCodeReview result as file
+        if: always()
+        run: |
+          # 方案：从 PR 评论中拉取 OCR Bot 的审查结果并保存为 JSON
+          sleep 5
+          OCR_BODY=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/comments" \
+            | python3 -c "
+          import sys, json
+          comments = json.load(sys.stdin)
+          for c in comments:
+              if c.get('user', {}).get('login', '') == 'open-code-review[bot]':
+                  print(json.dumps({
+                      'tool': 'open-code-review',
+                      'pr_number': ${{ steps.pr.outputs.number }},
+                      'comment_id': c['id'],
+                      'created_at': c['created_at'],
+                      'body': c['body'],
+                      'html_url': c['html_url']
+                  }, ensure_ascii=False, indent=2))
+                  break
+          else:
+              print(json.dumps({'tool': 'open-code-review', 'error': 'No OCR bot comment found'}))
+          " || echo '{"tool":"open-code-review","error":"Failed to fetch comment"}')
+
+          echo "$OCR_BODY" > ocr-review.json
+
+      - name: Upload OpenCodeReview Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-report
+          path: ocr-review.json
+          retention-days: 90
+
+  # ──────────────────────────────────────────────────────────
+  # Job 7: 汇总扫描结果索引
+  # ──────────────────────────────────────────────────────────
+  summary:
+    name: "📊 Summary"
+    runs-on: ubuntu-latest
+    needs: [semgrep, trivy, gitleaks, pr-agent, gito, open-code-review]
+    if: always()
+    steps:
+      - name: Generate Scan Index
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+
+          tools = {
+              "semgrep":       {"artifact": "semgrep-report",   "file": "semgrep-report.json"},
+              "trivy":         {"artifact": "trivy-report",     "file": "trivy-report.json"},
+              "gitleaks":      {"artifact": "gitleaks-report",  "file": "gitleaks-report.json"},
+              "pr-agent":      {"artifact": "pr-agent-report",  "file": "pr-agent-report.json"},
+              "gito":          {"artifact": "gito-report",      "file": "code-review-report.json"},
+              "open-code-review": {"artifact": "ocr-report",    "file": "ocr-review.json"},
+          }
+
+          index = {
+              "scan_id": f"scan-{os.environ.get('GITHUB_RUN_NUMBER', 'local')}",
+              "project": os.environ.get("GITHUB_REPOSITORY", "unknown"),
+              "pr_number": "${{ github.event.pull_request.number || github.event.inputs.pr_number }}",
+              "commit_sha": "${{ github.sha }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "tools": {}
+          }
+
+          for tool, info in tools.items():
+              status = "unknown"
+              if os.path.exists(f"artifacts/{info['artifact']}/{info['file']}"):
+                  status = "completed"
+              elif os.path.exists(info["file"]):
+                  status = "completed"
+              else:
+                  status = "failed_or_skipped"
+              index["tools"][tool] = {
+                  "artifact_name": info["artifact"],
+                  "report_file": info["file"],
+                  "status": status
+              }
+
+          with open("scan-index.json", "w") as f:
+              json.dump(index, f, indent=2)
+
+          print(json.dumps(index, indent=2))
+          PYEOF
+
+      - name: Upload Scan Index
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-index
+          path: scan-index.json
+          retention-days: 90
