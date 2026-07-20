@@ -41,10 +41,11 @@ jobs:
               --json \
               --output /src/semgrep-report.json \
               . || true
-          [ ! -f semgrep-report.json ] && echo '{}' > semgrep-report.json
+          test -f semgrep-report.json || echo '{}' > semgrep-report.json
 
       - name: Upload Semgrep Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: semgrep-report
           path: semgrep-report.json
@@ -67,10 +68,11 @@ jobs:
             aquasec/trivy fs /src \
               --format json \
               --output /src/trivy-report.json || true
-          [ ! -f trivy-report.json ] && echo '{}' > trivy-report.json
+          test -f trivy-report.json || echo '{}' > trivy-report.json
 
       - name: Upload Trivy Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: trivy-report
           path: trivy-report.json
@@ -95,10 +97,11 @@ jobs:
               --source=/repo \
               --report-format json \
               --report-path /repo/gitleaks-report.json || true
-          [ ! -f gitleaks-report.json ] && echo '{}' > gitleaks-report.json
+          test -f gitleaks-report.json || echo '{}' > gitleaks-report.json
 
       - name: Upload Gitleaks Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: gitleaks-report
           path: gitleaks-report.json
@@ -169,6 +172,7 @@ jobs:
 
       - name: Upload PR-Agent Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pr-agent-report
           path: |
@@ -220,6 +224,7 @@ jobs:
 
       - name: Upload GitO Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: gito-report
           path: |
@@ -290,13 +295,14 @@ jobs:
 
       - name: Upload OpenCodeReview Report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ocr-report
           path: ocr-review.json
           retention-days: 90
 
   # ──────────────────────────────────────────────────────────
-  # Job 7: 汇总扫描结果索引
+  # Job 7: 汇总所有扫描报告
   # ──────────────────────────────────────────────────────────
   summary:
     name: "📊 Summary"
@@ -304,21 +310,35 @@ jobs:
     needs: [semgrep, trivy, gitleaks, pr-agent, gito, open-code-review]
     if: always()
     steps:
-      - name: Generate Scan Index
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Combine All Reports
         run: |
           python3 << 'PYEOF'
-          import json, os
+          import json, os, glob
 
-          tools = {
-              "semgrep":       {"artifact": "semgrep-report",   "file": "semgrep-report.json"},
-              "trivy":         {"artifact": "trivy-report",     "file": "trivy-report.json"},
-              "gitleaks":      {"artifact": "gitleaks-report",  "file": "gitleaks-report.json"},
-              "pr-agent":      {"artifact": "pr-agent-report",  "file": "pr-agent-report.json"},
-              "gito":          {"artifact": "gito-report",      "file": "code-review-report.json"},
-              "open-code-review": {"artifact": "ocr-report",    "file": "ocr-review.json"},
+          tool_status_map = {
+              "semgrep": "${{ needs.semgrep.result }}",
+              "trivy": "${{ needs.trivy.result }}",
+              "gitleaks": "${{ needs.gitleaks.result }}",
+              "pr-agent": "${{ needs.pr-agent.result }}",
+              "gito": "${{ needs.gito.result }}",
+              "open-code-review": "${{ needs.open-code-review.result }}",
           }
 
-          index = {
+          tool_files = {
+              "semgrep":         "semgrep-report.json",
+              "trivy":           "trivy-report.json",
+              "gitleaks":        "gitleaks-report.json",
+              "pr-agent":        "pr-agent-report.json",
+              "gito":            "code-review-report.json",
+              "open-code-review": "ocr-review.json",
+          }
+
+          combined = {
               "scan_id": f"scan-{os.environ.get('GITHUB_RUN_NUMBER', 'local')}",
               "project": os.environ.get("GITHUB_REPOSITORY", "unknown"),
               "pr_number": "${{ github.event.pull_request.number || github.event.inputs.pr_number }}",
@@ -327,29 +347,67 @@ jobs:
               "tools": {}
           }
 
-          for tool, info in tools.items():
-              status = "unknown"
-              if os.path.exists(f"artifacts/{info['artifact']}/{info['file']}"):
-                  status = "completed"
-              elif os.path.exists(info["file"]):
-                  status = "completed"
+          for tool, filename in tool_files.items():
+              result = tool_status_map.get(tool, "unknown")
+              report_path = f"artifacts/{tool}-report/{filename}"
+
+              if os.path.exists(report_path):
+                  try:
+                      with open(report_path, "r") as f:
+                          report_data = json.load(f)
+                  except json.JSONDecodeError:
+                      with open(report_path, "r") as f:
+                          report_data = f.read()
+                  combined["tools"][tool] = {
+                      "status": "completed",
+                      "job_result": result,
+                      "report": report_data
+                  }
               else:
-                  status = "failed_or_skipped"
-              index["tools"][tool] = {
-                  "artifact_name": info["artifact"],
-                  "report_file": info["file"],
-                  "status": status
-              }
+                  # 尝试查找实际的 artifact 目录名
+                  found = False
+                  for artifact_dir in glob.glob("artifacts/*/"):
+                      candidate = os.path.join(artifact_dir, filename)
+                      if os.path.exists(candidate):
+                          try:
+                              with open(candidate, "r") as f:
+                                  report_data = json.load(f)
+                          except json.JSONDecodeError:
+                              with open(candidate, "r") as f:
+                                  report_data = f.read()
+                          combined["tools"][tool] = {
+                              "status": "completed",
+                              "job_result": result,
+                              "report": report_data
+                          }
+                          found = True
+                          break
+                  if not found:
+                      combined["tools"][tool] = {
+                          "status": "failed",
+                          "job_result": result,
+                          "report": None,
+                          "error": f"Report file {filename} not found in artifacts"
+                      }
 
-          with open("scan-index.json", "w") as f:
-              json.dump(index, f, indent=2)
+          with open("combined-security-report.json", "w") as f:
+              json.dump(combined, f, indent=2, ensure_ascii=False)
 
-          print(json.dumps(index, indent=2))
+          # 打印摘要
+          print("=" * 60)
+          print(f"  Security Scan Report - {combined['project']}")
+          print(f"  PR: #{combined['pr_number']} | Commit: {combined['commit_sha'][:8]}")
+          print("=" * 60)
+          for tool, data in combined["tools"].items():
+              status_icon = "✅" if data["status"] == "completed" else "❌"
+              report_size = len(json.dumps(data.get("report", {}))) if data.get("report") else 0
+              print(f"  {status_icon} {tool:20s} | {data['status']:10s} | {report_size:>8} bytes")
+          print("=" * 60)
           PYEOF
 
-      - name: Upload Scan Index
+      - name: Upload Combined Report
         uses: actions/upload-artifact@v4
         with:
-          name: scan-index
-          path: scan-index.json
+          name: combined-security-report
+          path: combined-security-report.json
           retention-days: 90
