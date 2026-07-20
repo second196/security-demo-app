@@ -1,5 +1,6 @@
 [config]
 model = "openai/mimo-v2.5"
+model_turbo = "openai/mimo-v2.5"
 custom_model_api_base = "https://token-plan-cn.xiaomimimo.com/v1"
 custom_model_max_tokens = 32000
 fallback_models = ["openai/mimo-v2.5"]
